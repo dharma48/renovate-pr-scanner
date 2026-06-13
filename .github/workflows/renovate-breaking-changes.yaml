@@ -2,10 +2,15 @@
 # Place this in a central repo, e.g. clintkev251/.github/.github/workflows/renovate-breaking-changes.yml
 # Each repo references it with a tiny caller workflow (see renovate-claude-caller.yml).
 #
-# What it does: on a Renovate-authored PR, Claude reads the release notes in the PR
-# body (or fetches the upstream changelog/compare diff when they're missing), greps
-# THIS repo for how the bumped dependency is actually used, and posts one sticky
-# comment summarizing only the breaking changes that affect your specific usage.
+# What it does: on a Renovate-authored PR, Claude reads the release notes (or fetches
+# the upstream changelog/compare diff when they're missing), greps THIS repo for how
+# the bumped dependency is actually used, and returns its findings as structured
+# output. A second step posts that as ONE sticky PR comment via `gh`.
+#
+# Why structured output + gh instead of letting Claude comment directly: in agent
+# mode (triggered by `prompt`) the action does NOT create or manage a comment, and
+# `use_sticky_comment` is a no-op. Posting in a dedicated step is deterministic — a
+# comment lands whenever the analysis completes.
 
 name: Renovate Breaking-Change Review (reusable)
 
@@ -48,18 +53,19 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
-      - name: Claude breaking-change review
+      - name: Analyze with Claude
+        id: review
         uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }} # lets Claude's `gh` reads authenticate
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          # Allow the action to act on a PR opened by a bot.
           allowed_bots: "renovate[bot]"
-          # Maintain a single comment that updates instead of spamming on rebases.
-          use_sticky_comment: true
           claude_args: |
             --model ${{ inputs.model }}
             --max-turns ${{ inputs.max_turns }}
-            --allowedTools "Read,Grep,Glob,WebFetch,WebSearch,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(grep:*),Bash(rg:*),Bash(find:*),Bash(cat:*),Bash(ls:*)"
+            --allowedTools "Read,Grep,Glob,WebFetch,WebSearch,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(grep:*),Bash(rg:*),Bash(find:*),Bash(cat:*),Bash(ls:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh api:*)"
+            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["clean","review","breakage"]},"comment_markdown":{"type":"string"}},"required":["verdict","comment_markdown"]}'
           prompt: |
             You are reviewing a Renovate dependency-update pull request to surface
             breaking changes that matter for THIS repository specifically.
@@ -70,39 +76,65 @@ jobs:
 
             Follow these steps:
 
-            1. Identify the dependency being updated and the exact old -> new version
-               from the PR title, body, and the diff of manifest/lock files
-               (package.json, go.mod, requirements.txt, Dockerfile, *.yaml, etc.).
-               A single Renovate PR may bump more than one package — handle each.
+            1. Read the PR itself. The PR body and diff are NOT automatically in your
+               context — fetch them:
+                 gh pr view ${{ github.event.pull_request.number }} --json title,body
+                 gh pr diff ${{ github.event.pull_request.number }}
+               From these, identify each dependency being updated and its exact
+               old -> new version (a single Renovate PR may bump more than one).
 
             2. Find the release notes. Renovate usually embeds a "Release Notes"
-               section in the PR body. Read it carefully for anything labeled
-               breaking, BREAKING CHANGE, removed, deprecated, renamed, default
-               changed, or requires migration.
+               section in the PR body. Read it for anything labeled breaking,
+               BREAKING CHANGE, removed, deprecated, renamed, default changed, or
+               requires migration.
 
             3. If the PR body has NO release notes, or they're truncated/unclear,
-               find them yourself. Identify the upstream source repository or
-               registry, then WebFetch the changelog or the GitHub compare view
-               between the two version tags
-               (e.g. https://github.com/<owner>/<repo>/compare/v<old>...v<new>).
+               find them yourself. Identify the upstream source repo or registry,
+               then WebFetch the changelog or the GitHub compare view between the two
+               version tags (e.g.
+               https://github.com/<owner>/<repo>/compare/v<old>...v<new>).
                For major-version bumps, always look for a migration guide.
 
             4. Determine how this repo ACTUALLY uses the dependency. Grep the
                codebase for imports, the specific APIs/functions/options/CLI flags,
                config keys, and features touched by the breaking changes. A breaking
-               change to an API this repo never calls does NOT matter here — say so.
+               change to an API this repo never calls does NOT matter here.
 
-            5. Post ONE pull-request comment (use the sticky comment) with:
-               - A one-line verdict at the top: one of
-                 "✅ No breaking changes affect this repo",
-                 "⚠️ Review needed — relevant breaking changes found", or
-                 "🚨 Likely breakage — action required before merge".
-               - For each RELEVANT breaking change: what changed, the concrete
-                 impact here, and the file(s)/line(s) in this repo affected.
-               - A short "What to double-check" note for anything you couldn't
-                 fully verify (e.g. runtime behavior, transitive deps).
-               - If nothing relevant: a single reassuring line plus what you checked.
+            5. Return STRUCTURED OUTPUT with two fields:
+               - "verdict": one of "clean" (nothing relevant), "review" (relevant
+                 breaking changes to look at), or "breakage" (likely to break, action
+                 required before merge).
+               - "comment_markdown": the full PR comment body in Markdown. Start with
+                 a one-line header matching the verdict:
+                   clean    -> "✅ No breaking changes affect this repo"
+                   review   -> "⚠️ Review needed — relevant breaking changes found"
+                   breakage -> "🚨 Likely breakage — action required before merge"
+                 Then, for each RELEVANT breaking change: what changed, the concrete
+                 impact here, and the file(s)/line(s) affected. Add a short
+                 "What to double-check" note for anything you couldn't fully verify.
+                 If the verdict is "clean", keep it to one reassuring line plus a
+                 brief note of what you checked.
 
             Be concise and specific — cite real files and symbols from this repo, not
             generic advice. Do not restate the entire changelog. Do not modify code,
-            push commits, approve, or merge. Comment only.
+            push commits, approve, or merge — your only output is the structured JSON.
+
+      - name: Post sticky PR comment
+        if: steps.review.outputs.structured_output != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STRUCTURED: ${{ steps.review.outputs.structured_output }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          MARKER="<!-- claude-renovate-review -->"
+          {
+            echo "$MARKER"
+            echo
+            echo "$STRUCTURED" | jq -r '.comment_markdown'
+          } > /tmp/comment.md
+
+          # Sticky behavior: edit our previous comment if one exists, else create.
+          if ! gh pr comment "$PR" --edit-last --body-file /tmp/comment.md 2>/dev/null; then
+            gh pr comment "$PR" --body-file /tmp/comment.md
+          fi
