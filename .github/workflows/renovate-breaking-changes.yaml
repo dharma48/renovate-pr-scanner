@@ -1,0 +1,107 @@
+# Reusable workflow: Claude reviews Renovate PRs for breaking changes.
+# Place this in a central repo, e.g. clintkev251/.github/.github/workflows/renovate-breaking-changes.yml
+# Each repo references it with a tiny caller workflow (see renovate-claude-caller.yml).
+#
+# What it does: on a Renovate-authored PR, Claude reads the release notes in the PR
+# body (or fetches the upstream changelog/compare diff when they're missing), greps
+# THIS repo for how the bumped dependency is actually used, and posts one sticky
+# comment summarizing only the breaking changes that affect your specific usage.
+
+name: Renovate Breaking-Change Review (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        description: Claude model to use.
+        type: string
+        required: false
+        default: claude-sonnet-4-6
+      max_turns:
+        description: Cap on agent turns (cost control).
+        type: string
+        required: false
+        default: "25"
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # Only run on Renovate PRs, and SKIP digest bumps (those auto-merge and
+    # shouldn't carry breaking changes). The job is skipped entirely when this is
+    # false, so digest PRs consume zero tokens — Claude is never invoked.
+    if: >-
+      (github.event.pull_request.user.login == 'renovate[bot]' ||
+       github.event.pull_request.user.login == 'renovate') &&
+      !contains(github.event.pull_request.title, 'digest')
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Claude breaking-change review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Allow the action to act on a PR opened by a bot.
+          allowed_bots: "renovate[bot]"
+          # Maintain a single comment that updates instead of spamming on rebases.
+          use_sticky_comment: true
+          claude_args: |
+            --model ${{ inputs.model }}
+            --max-turns ${{ inputs.max_turns }}
+            --allowedTools "Read,Grep,Glob,WebFetch,WebSearch,Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(grep:*),Bash(rg:*),Bash(find:*),Bash(cat:*),Bash(ls:*)"
+          prompt: |
+            You are reviewing a Renovate dependency-update pull request to surface
+            breaking changes that matter for THIS repository specifically.
+
+            Repository: ${{ github.repository }}
+            PR number:  ${{ github.event.pull_request.number }}
+            PR title:   ${{ github.event.pull_request.title }}
+
+            Follow these steps:
+
+            1. Identify the dependency being updated and the exact old -> new version
+               from the PR title, body, and the diff of manifest/lock files
+               (package.json, go.mod, requirements.txt, Dockerfile, *.yaml, etc.).
+               A single Renovate PR may bump more than one package — handle each.
+
+            2. Find the release notes. Renovate usually embeds a "Release Notes"
+               section in the PR body. Read it carefully for anything labeled
+               breaking, BREAKING CHANGE, removed, deprecated, renamed, default
+               changed, or requires migration.
+
+            3. If the PR body has NO release notes, or they're truncated/unclear,
+               find them yourself. Identify the upstream source repository or
+               registry, then WebFetch the changelog or the GitHub compare view
+               between the two version tags
+               (e.g. https://github.com/<owner>/<repo>/compare/v<old>...v<new>).
+               For major-version bumps, always look for a migration guide.
+
+            4. Determine how this repo ACTUALLY uses the dependency. Grep the
+               codebase for imports, the specific APIs/functions/options/CLI flags,
+               config keys, and features touched by the breaking changes. A breaking
+               change to an API this repo never calls does NOT matter here — say so.
+
+            5. Post ONE pull-request comment (use the sticky comment) with:
+               - A one-line verdict at the top: one of
+                 "✅ No breaking changes affect this repo",
+                 "⚠️ Review needed — relevant breaking changes found", or
+                 "🚨 Likely breakage — action required before merge".
+               - For each RELEVANT breaking change: what changed, the concrete
+                 impact here, and the file(s)/line(s) in this repo affected.
+               - A short "What to double-check" note for anything you couldn't
+                 fully verify (e.g. runtime behavior, transitive deps).
+               - If nothing relevant: a single reassuring line plus what you checked.
+
+            Be concise and specific — cite real files and symbols from this repo, not
+            generic advice. Do not restate the entire changelog. Do not modify code,
+            push commits, approve, or merge. Comment only.
