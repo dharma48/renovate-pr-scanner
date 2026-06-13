@@ -23,7 +23,7 @@ on:
         required: false
         default: "25"
     secrets:
-      CLAUDE_CODE_OAUTH_TOKEN:
+      ANTHROPIC_API_KEY:
         required: true
 
 jobs:
@@ -40,6 +40,7 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
+      id-token: write # required: the action mints its GitHub token via OIDC
     steps:
       - name: Checkout PR
         uses: actions/checkout@v4
@@ -50,7 +51,7 @@ jobs:
       - name: Claude breaking-change review
         uses: anthropics/claude-code-action@v1
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Allow the action to act on a PR opened by a bot.
           allowed_bots: "renovate[bot]"
           # Maintain a single comment that updates instead of spamming on rebases.
