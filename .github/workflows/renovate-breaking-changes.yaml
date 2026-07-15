@@ -97,8 +97,10 @@ jobs:
 
             4. Determine how this repo ACTUALLY uses the dependency. Grep the
                codebase for imports, the specific APIs/functions/options/CLI flags,
-               config keys, and features touched by the breaking changes. A breaking
-               change to an API this repo never calls does NOT matter here.
+               config keys, and features touched by the breaking changes. Also review
+               comments in the immediate vicinity of the code change (usually image tag)
+               for notes detailing any possible common breaking changes
+               A breaking change to an API this repo never calls does NOT matter here.
 
             5. Return STRUCTURED OUTPUT with two fields:
                - "verdict": one of "clean" (nothing relevant), "review" (relevant
