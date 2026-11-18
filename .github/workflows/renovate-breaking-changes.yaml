@@ -44,6 +44,7 @@ jobs:
     # false, so digest PRs consume zero tokens — Claude is never invoked.
     if: >-
       (github.event.pull_request.user.login == 'renovate[bot]' ||
+       github.event.pull_request.user.login == 'dharma48-renovate[bot]' ||
        github.event.pull_request.user.login == 'renovate') &&
       !contains(github.event.pull_request.title, 'digest')
     permissions:
@@ -65,7 +66,7 @@ jobs:
           GH_TOKEN: ${{ github.token }} # lets Claude's `gh` reads authenticate
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          allowed_bots: "renovate[bot]"
+          allowed_bots: "renovate[bot],dharma48-renovate[bot]"
           claude_args: |
             --model ${{ inputs.model }}
             --max-turns ${{ inputs.max_turns }}
